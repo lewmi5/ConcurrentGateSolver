@@ -8,17 +8,18 @@ import cp2024.circuit.ThresholdNode;
 import java.util.ArrayList;
 import java.util.concurrent.*;
 
+// Class representing the parallel execution of a circuit node
 public class ParallelCircuitValue implements CircuitValue, Runnable {
     private final ExecutorService pool;
     private final CircuitNode node;
-    private final Semaphore isFree = new Semaphore(0);
+    private final Semaphore isFree = new Semaphore(0); // Synchronization semaphore
 
     private boolean evaluation;
-    private final BlockingQueue<Boolean> resultsInParent;
+    private final BlockingQueue<Boolean> resultsInParent; // Parent node result queue
 
-    private final ArrayList<Future<?>> futures = new ArrayList<>();
-    private final ArrayList<ParallelCircuitValue> tasks = new ArrayList<>();
-    private final BlockingQueue<Boolean> resultsFromSons = new LinkedBlockingQueue<>();
+    private final ArrayList<Future<?>> futures = new ArrayList<>(); // Stores future tasks
+    private final ArrayList<ParallelCircuitValue> tasks = new ArrayList<>(); // Child tasks
+    private final BlockingQueue<Boolean> resultsFromSons = new LinkedBlockingQueue<>(); // Child results queue
 
     ParallelCircuitValue(CircuitNode node, ExecutorService pool, BlockingQueue<Boolean> resultsQueue) {
         this.node = node;
@@ -26,15 +27,12 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
         this.resultsInParent = resultsQueue;
     }
 
-    /*
-     * Returns evaluation of gate when finished.
-     */
+    // Returns the computed value of the circuit node
     @Override
     public boolean getValue() throws InterruptedException {
-        isFree.acquire();
+        isFree.acquire(); // Wait until computation is done
         boolean result = evaluation;
-        isFree.release();
-
+        isFree.release(); // Release semaphore for next access
         return result;
     }
 
@@ -51,44 +49,41 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
                 case LEAF -> evaluateSLEEPYLEAFNODE((LeafNode) node);
                 default -> throw new RuntimeException("Illegal type " + node.getType());
             }
-
-            // Marking that gate was evaluated.
-            isFree.release();
-            // Now getValue() is being woken up on semaphore.
+            isFree.release(); // Mark completion
         } catch (InterruptedException | ExecutionException e) {
             handleInterruption();
             return;
         }
-        return;
     }
 
+    // Creates tasks for each child node
     private void createTasksFromArgs() throws InterruptedException {
-        for (int i = 0; i < node.getArgs().length; i++) {
-            CircuitNode toAdd = node.getArgs()[i];
+        for (CircuitNode toAdd : node.getArgs()) {
             tasks.add(new ParallelCircuitValue(toAdd, pool, resultsFromSons));
         }
     }
 
+    // Submits tasks for execution
     private void submitTasks() {
         for (ParallelCircuitValue task : tasks) {
             futures.add(pool.submit(task));
         }
     }
 
+    // Handles thread interruption
     private void handleInterruption() {
         stopChildren();
         isFree.release();
     }
 
-    /*
-     * Stops execution of children threads.
-     */
+    // Stops execution of all child tasks
     private void stopChildren() {
         for (Future<?> f : futures) {
             f.cancel(true);
         }
     }
 
+    // Evaluates an AND gate in parallel
     private void evaluateAND(CircuitNode node) throws InterruptedException {
         createTasksFromArgs();
         submitTasks();
@@ -99,20 +94,14 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
             if (!resultsFromSons.take()) {
                 evaluation = false;
                 break;
-            } else {
-                subtreesEvaluated++;
             }
-
-            if(Thread.currentThread().isInterrupted()) {
-                handleInterruption();
-                return;
-            }
+            subtreesEvaluated++;
         }
         stopChildren();
-
         resultsInParent.put(evaluation);
     }
 
+    // Evaluates an OR gate in parallel
     private void evaluateOR(CircuitNode node) throws InterruptedException {
         createTasksFromArgs();
         submitTasks();
@@ -123,20 +112,14 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
             if (resultsFromSons.take()) {
                 evaluation = true;
                 break;
-            } else {
-                subtreesEvaluated++;
             }
-
-            if(Thread.currentThread().isInterrupted()) {
-                handleInterruption();
-                return;
-            }
+            subtreesEvaluated++;
         }
         stopChildren();
-
         resultsInParent.put(evaluation);
     }
 
+    // Evaluates a NOT gate in parallel
     private void evaluateNOT(CircuitNode node) throws InterruptedException {
         createTasksFromArgs();
         submitTasks();
@@ -145,16 +128,12 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
         resultsInParent.put(evaluation);
     }
 
-    /*
-     * if(args[0])
-     *      evaluation = args[1];
-     * else
-     *      evaluation = args[2];
-     */
+    // Evaluates an IF condition node in parallel
     private void evaluateIF(CircuitNode node) throws InterruptedException, ExecutionException {
         BlockingQueue<Boolean> result_a = new LinkedBlockingQueue<>();
         BlockingQueue<Boolean> result_b = new LinkedBlockingQueue<>();
         BlockingQueue<Boolean> result_c = new LinkedBlockingQueue<>();
+
         Future<?> f_a = pool.submit(new ParallelCircuitValue(node.getArgs()[0], pool, result_a));
         Future<?> f_b = pool.submit(new ParallelCircuitValue(node.getArgs()[1], pool, result_b));
         Future<?> f_c = pool.submit(new ParallelCircuitValue(node.getArgs()[2], pool, result_c));
@@ -169,20 +148,16 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
             f_c.get();
             evaluation = result_c.take();
         }
-
         resultsInParent.put(evaluation);
     }
 
+    // Evaluates a leaf node (final value node)
     private void evaluateSLEEPYLEAFNODE(LeafNode node) throws InterruptedException {
         evaluation = node.getValue();
         resultsInParent.put(evaluation);
     }
 
-    /*
-     * If true occurs more than node.getThreshold()
-     * gate is evaluated to true.
-     * Otherwise to false.
-     */
+    // Evaluates a GT (greater than threshold) node
     private void evaluateGT(ThresholdNode node) throws InterruptedException {
         createTasksFromArgs();
         submitTasks();
@@ -196,49 +171,9 @@ public class ParallelCircuitValue implements CircuitValue, Runnable {
                 gotTrue++;
             }
             subtreesEvaluated++;
-        
-            if(Thread.currentThread().isInterrupted()) {
-                handleInterruption();
-                return;
-            }
         }
         stopChildren();
-
         evaluation = gotTrue > threshold;
-        resultsInParent.put(evaluation);
-    }
-
-
-    /*
-     * If true occurs less than node.getThreshold()
-     * gate is evaluated to true.
-     * Otherwise to false.
-     */
-    private void evaluateLT(ThresholdNode node) throws InterruptedException {
-        createTasksFromArgs();
-        submitTasks();
-
-        // True lest than x - 1 times
-        // <=>
-        // False at most n - x + 1 razy
-        int gotFalse = 0;
-        int threshold = node.getArgs().length - node.getThreshold();
-        int subtreesEvaluated = 0;
-
-        while (gotFalse <= threshold && subtreesEvaluated < node.getArgs().length) {
-            if (!resultsFromSons.take()) {
-                gotFalse++;
-            }
-            subtreesEvaluated++;
-
-            if(Thread.currentThread().isInterrupted()) {
-                handleInterruption();
-                return;
-            }
-        }
-        stopChildren();
-
-        evaluation = gotFalse > threshold;
         resultsInParent.put(evaluation);
     }
 }
